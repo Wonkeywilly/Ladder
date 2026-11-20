@@ -76,6 +76,9 @@ tr.fill td:first-child{box-shadow:3px 0 0 var(--green) inset}
 #optTbl tr.cur td{background:#0f2130}
 #optTbl button{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:6px;padding:3px 9px;cursor:pointer;font-size:12px}
 #optTbl button:hover{border-color:var(--accent)}
+.sch{font-size:13.5px;line-height:1.55}.sch b{font-family:var(--mono)}
+.ep{display:inline-block;font:11.5px var(--mono);border:1px solid var(--line);border-radius:5px;padding:0 6px;margin:2px 4px 0 0;color:var(--muted)}
+#scBt td,#scBt th{text-align:right}#scBt td:first-child,#scBt th:first-child{text-align:left;font-family:system-ui}
 </style>
 </head>
 <body>
@@ -148,6 +151,23 @@ tr.fill td:first-child{box-shadow:3px 0 0 var(--green) inset}
         <div class="scen" id="scen"></div>
       </div>
     </div>
+  </div>
+  <div class="panel" style="margin-top:14px" id="scPanel">
+    <div class="phead"><h2 style="margin:0">Suggested course from today's price <span id="scH" style="text-transform:none;letter-spacing:0;font-weight:400"></span></h2></div>
+    <div id="scHead" class="sch"></div>
+    <div class="kpis" id="scK" style="margin:10px 0 0"></div>
+    <div class="bt2" style="margin-top:14px">
+      <div>
+        <h2>Suggested ladder</h2>
+        <div class="scroll"><table id="scTbl"></table></div>
+        <div class="btns"><button class="b" id="scLoad">Load suggested course</button><button class="b" id="scLoadFit">Load best fit on similar weeks</button></div>
+      </div>
+      <div>
+        <h2>How it did from similar weeks</h2>
+        <div class="scroll"><table id="scBt"></table></div>
+      </div>
+    </div>
+    <div class="note" id="scNote"></div>
   </div>
   <div class="panel" style="margin-top:14px" id="btPanel">
     <div class="phead"><h2 style="margin:0">Backtest this setup</h2><span class="asof" id="btRange"></span></div>
@@ -396,7 +416,7 @@ function renderLive(){ const f=F(),p=P(),R=compute(f,p); labels(); renderKPIs(f,
 function renderAll(){
   const f=F(),p=P(),R=compute(f,p);
   $('asof').textContent=AS_OF; $('chartTitle').textContent=`${f.id} · ${f.name}`;
-  labels(); renderChips(); renderKPIs(f,R); renderTable(f,p,R); const s=renderStress(f,p,R); drawChart(f,p,R,s); save(); clearTimeout(window._bt); window._bt=setTimeout(renderBacktest,60);
+  labels(); renderChips(); renderKPIs(f,R); renderTable(f,p,R); const s=renderStress(f,p,R); drawChart(f,p,R,s); save(); clearTimeout(window._bt); window._bt=setTimeout(()=>{ renderBacktest(); renderCourse(); },60);
 }
 
 // ===== Backtest engine (weekly closes) =====
@@ -556,8 +576,81 @@ function renderOpt(key){
     S.plans[id]=Object.assign({},keep,JSON.parse(JSON.stringify(b.pl)),{budget:keep.budget,customRef:keep.customRef,drop:keep.drop});
     S.cur=id; syncControls(); renderAll(); toast(id+' best plan loaded'); document.querySelector('.grid').scrollIntoView({behavior:'smooth'}); });
 }
-['btH','btCash'].forEach(id=>$(id).addEventListener('change',()=>{ renderBacktest(); runOptimiser(); }));
-$('obj').onchange = runOptimiser; $('minDep').onchange = runOptimiser;
+['btH','btCash'].forEach(id=>$(id).addEventListener('change',()=>{ renderBacktest(); renderCourse(); runOptimiser(); }));
+$('obj').onchange = ()=>{ runOptimiser(); renderCourse(); }; $('minDep').onchange = ()=>{ runOptimiser(); renderCourse(); };
+
+// ===== Suggested course from today's price (analogue weeks) =====
+function pctile(a,q){ const s=a.slice().sort((x,y)=>x-y); if(!s.length) return 0; const i=(s.length-1)*q, lo=Math.floor(i), hi=Math.ceil(i); return s[lo]+(s[hi]-s[lo])*(i-lo); }
+const ffmt=v=>v<0.0005?'none':'−'+(v*100).toFixed(1)+'%';
+function analogues(f,H){
+  const n=f.w.length, hiNow=Math.max(f.r52[n-1], f.lastP), ddNow=f.lastP/hiNow-1, last=n-1-H;
+  const cand=[]; for(let s=0;s<=last;s++) cand.push({s, dd:f.w[s]/f.r52[s]-1});
+  let band=0.03, pick=[];
+  let used=band; while(band<=0.12+1e-9){ pick=cand.filter(c=>Math.abs(c.dd-ddNow)<=band); used=band; if(pick.length>=15) break; band+=0.01; } band=used;
+  let mode='band';
+  const closest=Math.min(...cand.map(c=>Math.abs(c.dd-ddNow)));
+  if(pick.length<8 || closest>0.05){ pick=cand.slice().sort((a,b)=>Math.abs(a.dd-ddNow)-Math.abs(b.dd-ddNow)).slice(0,15).sort((a,b)=>a.s-b.s); mode='nearest'; }
+  const eps=[]; pick.forEach(c=>{ const e=eps[eps.length-1]; if(e && c.s-e.b<=8) e.b=c.s; else eps.push({a:c.s,b:c.s}); });
+  return {ddNow, band, mode, starts:pick.map(c=>c.s), dds:pick.map(c=>c.dd), eps};
+}
+function backtestOn(f,starts,init,tr,refMode,H,rate){
+  const rw=Math.pow(1+rate/100,1/52)-1, L=[],LU=[],D=[]; let dep=0,k=0;
+  starts.forEach(s=>{ const r=runOne(f,s,H,init,tr,refMode,rw), b=benches(f,s,H,rw); L.push(r.ret); LU.push(b.lump); D.push(b.drip); dep+=r.dep; k+=r.k; });
+  return {sL:statsOf(L),sLU:statsOf(LU),sD:statsOf(D), wl:L.filter((x,i)=>x>LU[i]).length/L.length, dep:dep/starts.length, k:k/starts.length};
+}
+let SC=null;
+function renderCourse(){
+  const f=F(), p=P(), H=+$('btH').value, rate=+$('btCash').value||0, obj=$('obj').value, md=+$('minDep').value/100;
+  $('scH').textContent='· '+$('btH').selectedOptions[0].text+' view';
+  if(f.w.length-1-H<10){ $('scHead').textContent='Not enough history for this holding period.'; return; }
+  const A=analogues(f,H), st=A.starts, w=f.w;
+  const fwd=st.map(s=>w[s+H]/w[s]-1), fall=st.map(s=>{ let m=w[s]; for(let q=s;q<=s+H;q++) m=Math.min(m,w[q]); return 1-m/w[s]; });
+  const up=fwd.filter(x=>x>0).length/fwd.length;
+  const lo=Math.min(...A.dds), hi=Math.max(...A.dds);
+  const thin=A.eps.length<3 || A.mode==='nearest';
+  $('scHead').innerHTML = `${f.id} is <b>${Math.abs(A.ddNow*100).toFixed(1)}%</b> below its 52-week high (weekly closes). `
+    + (A.mode==='band' ? `The history has <b>${st.length}</b> start weeks within ±${(A.band*100).toFixed(0)} points of that (${(lo*100).toFixed(0)}% to ${(hi*100).toFixed(0)}%), across <b>${A.eps.length}</b> separate episode${A.eps.length>1?'s':''}:`
+                       : `<span class="amb">The fund hasn't been this far down in the history we have, so these are the ${st.length} closest weeks (${(lo*100).toFixed(0)}% to ${(hi*100).toFixed(0)}% from the high)</span>, across <b>${A.eps.length}</b> episode${A.eps.length>1?'s':''}:`)
+    + '<br>' + A.eps.map(e=>`<span class="ep">${wDate(f,e.a)}${wDate(f,e.b)!==wDate(f,e.a)?' – '+wDate(f,e.b):''}</span>`).join('')
+    + (thin?'<br><span class="amb">Thin evidence: few independent episodes, so treat this as a sketch.</span>':'');
+  const k=[
+    ['Higher after hold', (up*100).toFixed(0)+'%', 'of similar weeks'],
+    ['Median return', pp(pctile(fwd,.5)), 'range '+pp(Math.min(...fwd))+' to '+pp(Math.max(...fwd))],
+    ['Typical further fall', ffmt(pctile(fall,.5)), 'median, from entry'],
+    ['Bad-case further fall', ffmt(pctile(fall,.9)), '1 in 10 went deeper'],
+    ['Worst further fall', ffmt(Math.max(...fall)), 'in these weeks'],
+  ];
+  $('scK').innerHTML=k.map(x=>`<div class="kpi"><span>${x[0]}</span><b>${x[1]}</b><br><i>${x[2]}</i></div>`).join('');
+  // rule-based course: buy-in ≈ odds of being higher; set points at the 50/75/90th percentile further falls
+  const init=Math.min(80,Math.max(20,Math.round(up*10)*10));
+  let dds=[.5,.75,.9].map(q=>Math.max(1,Math.round(pctile(fall,q)*200)/2)); const tr0=[];
+  dds.forEach(d=>{ if(!tr0.length || d>=tr0[tr0.length-1]+1) tr0.push(d); });
+  const course={refMode:'now', initPct:init, n:tr0.length, first:tr0[0], step:tr0.length>1?Math.round((tr0[tr0.length-1]-tr0[0])/(tr0.length-1)*2)/2:tr0[0], skew:0, tr:tr0.map(d=>({dd:d,w:1}))};
+  const lad=p.budget*(1-init/100)/tr0.length, qs=['typical (half went deeper)','1 in 4 went deeper','1 in 10 went deeper'];
+  let h=`<tr><th>Step</th><th>Drop from today</th><th>Price</th><th>£ of ${gbp(p.budget,0)}</th><th>Why here</th></tr>`
+   + `<tr class="init"><td>Buy-in</td><td>—</td><td>${gbp(f.lastP)}</td><td>${gbp(p.budget*init/100,0)}</td><td style="text-align:left;font-family:system-ui">${init}% ≈ share of similar weeks higher after the hold</td></tr>`;
+  tr0.forEach((d,i)=>{ const qi=dds.indexOf(d); h+=`<tr><td>T${i+1}</td><td>−${d.toFixed(1)}%</td><td>${gbp(f.lastP*(1-d/100))}</td><td>${gbp(lad,0)}</td><td style="text-align:left;font-family:system-ui">further fall: ${qs[qi>=0?qi:i]}</td></tr>`; });
+  $('scTbl').innerHTML=h;
+  // backtest course + current plan + best fit on the analogue weeks
+  const bc=backtestOn(f,st,init/100,planToTr(course),'now',H,rate), bp=backtestOn(f,st,p.initPct/100,planToTr(p),p.refMode,H,rate);
+  const rw=Math.pow(1+rate/100,1/52)-1; let best=null;
+  for(const g of GRID){ const pl=comboPlan(f,g), tr=planToTr(pl), R=[]; let dep=0, win=0;
+    st.forEach(s=>{ const r=runOne(f,s,H,g.ip/100,tr,g.rm,rw); R.push(r.ret); dep+=r.dep; if(r.ret>f.w[s+H]/f.w[s]-1) win++; });
+    const ss=statsOf(R), wl=win/st.length, sc=score(ss,wl,obj), ok=dep/st.length>=md;
+    if(!best || (ok&&!best.ok) || (ok===best.ok && sc>best.sc)) best={sc,g,pl,ss,wl,ok,dep:dep/st.length}; }
+  SC={course,best};
+  const col=(lbl,s,wl,dep)=>`<td class="${cls(s.mean)}">${pp(s.mean)}</td><td class="${cls(s.min)}">${pp(s.min)}</td><td>${wl==null?'—':(wl*100).toFixed(0)+'%'}</td><td>${dep==null?'100%':(dep*100).toFixed(0)+'%'}</td>`;
+  const skL=v=>v===0?'equal':(v>0?'more lower':'less lower');
+  $('scBt').innerHTML=`<tr><th>On the ${st.length} similar weeks</th><th>Avg</th><th>Worst</th><th>Beat lump</th><th>Cash used</th></tr>`
+    + `<tr><td><b>Suggested course</b></td>${col('',bc.sL,bc.wl,bc.dep)}</tr>`
+    + `<tr><td>Best fit here <span class="asof">(${best.g.ip}% in, ${best.g.n}× ${best.pl.step}% gaps, ${skL(best.g.sk)}, from ${best.g.rm==='now'?'entry':'52w high'})</span></td>${col('',best.ss,best.wl,best.dep)}</tr>`
+    + `<tr><td>Your current plan</td>${col('',bp.sL,bp.wl,bp.dep)}</tr>`
+    + `<tr><td>Lump sum today</td>${col('',bc.sLU,null,null)}</tr>`
+    + `<tr><td>Weekly drip</td>${col('',bc.sD,null,null)}</tr>`;
+  $('scNote').innerHTML=`How it's built: the buy-in follows how often similar weeks ended the hold higher. The set points sit where the further fall stopped in half, a quarter and a tenth of those cases, so a deeper set point fills less often. "Best fit here" runs the 1,000-shape search on these weeks only, using the objective and cash-used rule below${best.ok?'':' (<span class="amb">no shape met the cash-used minimum on these weeks</span>)'}. Similar weeks overlap heavily, so the episode count is the true sample size. Matching is on distance from the high only, not on why the fund fell.`;
+}
+$('scLoad').onclick=()=>{ if(!SC) return; const keep=P(); S.plans[S.cur]=Object.assign({},keep,JSON.parse(JSON.stringify(SC.course))); syncControls(); renderAll(); toast('Suggested course loaded'); document.querySelector('.grid').scrollIntoView({behavior:'smooth'}); };
+$('scLoadFit').onclick=()=>{ if(!SC) return; const keep=P(); S.plans[S.cur]=Object.assign({},keep,JSON.parse(JSON.stringify(SC.best.pl))); syncControls(); renderAll(); toast('Best fit loaded'); document.querySelector('.grid').scrollIntoView({behavior:'smooth'}); };
 
 // ===== Controls =====
 const regen = () => { const p=P(); p.tr=gen(p.n,p.first,p.step,p.skew); };
